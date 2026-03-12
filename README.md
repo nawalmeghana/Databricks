@@ -1,4 +1,4 @@
-# 📡 Telecom Data Lakehouse Platform
+# Databricks# 📡 Telecom Data Lakehouse Platform
 ### Production-Grade Data Engineering on Databricks | Delta Lake | Medallion Architecture
 
 ---
