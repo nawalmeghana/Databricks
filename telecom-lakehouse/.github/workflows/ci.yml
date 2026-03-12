@@ -1,0 +1,89 @@
+name: Telecom Lakehouse CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    name: Lint + Unit Tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pyspark==3.5.0 pytest==7.4.0 flake8==6.1.0
+
+      - name: Lint with flake8
+        run: |
+          # Stop on syntax errors, ignore line-length (E501) in notebooks
+          flake8 data_quality/ tests/ pipelines/ --max-line-length=120 --extend-ignore=E501,W503
+
+      - name: Run unit tests
+        run: |
+          pytest tests/ -v --tb=short --no-header
+        env:
+          PYSPARK_SUBMIT_ARGS: "--master local[2] pyspark-shell"
+
+  validate-sql:
+    runs-on: ubuntu-latest
+    name: Validate SQL Files
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check SQL files exist and are non-empty
+        run: |
+          for f in dashboards/queries/*.sql models/*.sql; do
+            if [ ! -s "$f" ]; then
+              echo "ERROR: $f is empty or missing"
+              exit 1
+            fi
+            echo "✅ $f"
+          done
+
+  validate-structure:
+    runs-on: ubuntu-latest
+    name: Validate Project Structure
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required files exist
+        run: |
+          required_files=(
+            "README.md"
+            "requirements.txt"
+            "notebooks/bronze/01_bronze_ingestion.py"
+            "notebooks/silver/02_silver_transformation.py"
+            "notebooks/gold/03_gold_aggregation.py"
+            "notebooks/streaming/04_streaming_pipeline.py"
+            "notebooks/delta_features/05_delta_features.py"
+            "data_quality/dq_checks.py"
+            "models/star_schema.sql"
+            "automation/job_definition.json"
+            "tests/test_pipelines.py"
+          )
+          for f in "${required_files[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "ERROR: Required file missing: $f"
+              exit 1
+            fi
+            echo "✅ $f"
+          done

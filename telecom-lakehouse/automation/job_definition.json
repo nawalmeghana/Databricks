@@ -1,0 +1,176 @@
+{
+  "name": "Telecom Lakehouse Pipeline — Full Refresh",
+  "description": "End-to-end medallion pipeline: Bronze → Silver → Gold → DQ checks. Runs every 30 minutes.",
+  "tags": {
+    "project": "telecom-lakehouse",
+    "env": "production",
+    "team": "data-engineering"
+  },
+  "schedule": {
+    "quartz_cron_expression": "0 0/30 * * * ?",
+    "timezone_id": "America/New_York",
+    "pause_status": "UNPAUSED"
+  },
+  "max_concurrent_runs": 1,
+  "tasks": [
+    {
+      "task_key": "bronze_ingestion",
+      "description": "Ingest raw CSV files into Bronze Delta tables",
+      "notebook_task": {
+        "notebook_path": "/Repos/telecom-lakehouse/notebooks/bronze/01_bronze_ingestion",
+        "base_parameters": {
+          "RAW_DATA_PATH": "/FileStore/telecom/raw",
+          "BRONZE_PATH": "/FileStore/telecom/bronze"
+        }
+      },
+      "new_cluster": {
+        "spark_version": "14.3.x-scala2.12",
+        "node_type_id": "i3.xlarge",
+        "num_workers": 2,
+        "spark_conf": {
+          "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
+          "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+        },
+        "spark_env_vars": {
+          "PYSPARK_PYTHON": "/databricks/python3/bin/python3"
+        },
+        "autoscale": {
+          "min_workers": 2,
+          "max_workers": 4
+        }
+      },
+      "libraries": [
+        {"pypi": {"package": "delta-spark==3.1.0"}},
+        {"pypi": {"package": "great-expectations==0.18.0"}}
+      ],
+      "timeout_seconds": 1800,
+      "max_retries": 2,
+      "min_retry_interval_millis": 60000
+    },
+    {
+      "task_key": "data_quality_bronze",
+      "description": "Run DQ checks on Bronze tables before transformation",
+      "depends_on": [{"task_key": "bronze_ingestion"}],
+      "notebook_task": {
+        "notebook_path": "/Repos/telecom-lakehouse/data_quality/dq_checks",
+        "base_parameters": {
+          "layer": "bronze",
+          "fail_on_critical": "true"
+        }
+      },
+      "existing_cluster_id": "{{tasks.bronze_ingestion.cluster_id}}",
+      "timeout_seconds": 600
+    },
+    {
+      "task_key": "silver_transformation",
+      "description": "Clean and transform Bronze → Silver Delta tables",
+      "depends_on": [{"task_key": "data_quality_bronze"}],
+      "notebook_task": {
+        "notebook_path": "/Repos/telecom-lakehouse/notebooks/silver/02_silver_transformation",
+        "base_parameters": {
+          "SILVER_PATH": "/FileStore/telecom/silver"
+        }
+      },
+      "new_cluster": {
+        "spark_version": "14.3.x-scala2.12",
+        "node_type_id": "i3.xlarge",
+        "num_workers": 4,
+        "spark_conf": {
+          "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
+          "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+          "spark.sql.shuffle.partitions": "200"
+        },
+        "autoscale": {
+          "min_workers": 2,
+          "max_workers": 8
+        }
+      },
+      "libraries": [
+        {"pypi": {"package": "delta-spark==3.1.0"}}
+      ],
+      "timeout_seconds": 3600,
+      "max_retries": 1
+    },
+    {
+      "task_key": "data_quality_silver",
+      "description": "Run full DQ suite on Silver tables — gate before Gold",
+      "depends_on": [{"task_key": "silver_transformation"}],
+      "notebook_task": {
+        "notebook_path": "/Repos/telecom-lakehouse/data_quality/dq_checks",
+        "base_parameters": {
+          "layer": "silver",
+          "fail_on_critical": "true"
+        }
+      },
+      "existing_cluster_id": "{{tasks.silver_transformation.cluster_id}}",
+      "timeout_seconds": 900
+    },
+    {
+      "task_key": "gold_aggregation",
+      "description": "Build Gold KPI tables and analytics aggregations",
+      "depends_on": [{"task_key": "data_quality_silver"}],
+      "notebook_task": {
+        "notebook_path": "/Repos/telecom-lakehouse/notebooks/gold/03_gold_aggregation",
+        "base_parameters": {
+          "GOLD_PATH": "/FileStore/telecom/gold"
+        }
+      },
+      "new_cluster": {
+        "spark_version": "14.3.x-scala2.12",
+        "node_type_id": "i3.xlarge",
+        "num_workers": 2,
+        "spark_conf": {
+          "spark.sql.extensions": "io.delta.sql.DeltaSparkSessionExtension",
+          "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+        }
+      },
+      "libraries": [
+        {"pypi": {"package": "delta-spark==3.1.0"}}
+      ],
+      "timeout_seconds": 2400,
+      "max_retries": 1
+    },
+    {
+      "task_key": "delta_optimize",
+      "description": "OPTIMIZE + Z-ORDER all Gold tables for dashboard query performance",
+      "depends_on": [{"task_key": "gold_aggregation"}],
+      "notebook_task": {
+        "notebook_path": "/Repos/telecom-lakehouse/notebooks/delta_features/05_delta_features",
+        "base_parameters": {
+          "run_mode": "optimize_only"
+        }
+      },
+      "existing_cluster_id": "{{tasks.gold_aggregation.cluster_id}}",
+      "timeout_seconds": 1200
+    },
+    {
+      "task_key": "notify_success",
+      "description": "Send pipeline success notification",
+      "depends_on": [{"task_key": "delta_optimize"}],
+      "notebook_task": {
+        "notebook_path": "/Repos/telecom-lakehouse/automation/notify",
+        "base_parameters": {
+          "status": "SUCCESS",
+          "pipeline": "telecom-lakehouse-full-refresh"
+        }
+      },
+      "existing_cluster_id": "{{tasks.gold_aggregation.cluster_id}}",
+      "timeout_seconds": 120
+    }
+  ],
+  "email_notifications": {
+    "on_failure": ["data-engineering@company.com"],
+    "on_success": [],
+    "no_alert_for_skipped_runs": true
+  },
+  "webhook_notifications": {
+    "on_failure": [
+      {
+        "id": "slack-webhook-id"
+      }
+    ]
+  },
+  "run_as": {
+    "service_principal_name": "telecom-lakehouse-sp"
+  }
+}
